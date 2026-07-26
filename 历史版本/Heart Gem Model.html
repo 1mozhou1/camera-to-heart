@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Heart Gem — 蓝宝石粒子心</title>
+<style>
+body { margin:0; overflow:hidden; background:#010610; }
+canvas { display:block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function(){
+var canvas = document.getElementById('c');
+var ctx = canvas.getContext('2d');
+
+var W, H, cx, cy, sc;
+function resize() {
+    W = canvas.width  = window.innerWidth;
+    H = canvas.height = window.innerHeight;
+    sc = Math.min(W, H) * 0.016;
+    cx = W / 2;
+    cy = H / 2;
+}
+resize();
+window.addEventListener('resize', resize);
+
+function lerp(a,b,t) { return a+(b-a)*t; }
+function clamp(v,lo,hi) { return v<lo?lo:v>hi?hi:v; }
+
+function heartX(t) { var s=Math.sin(t); return 17*s*s*s; }
+function heartY(t) { return 13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t); }
+
+// ═══ 光照（世界空间）═══
+function norm3(x,y,z) {
+    var l=Math.sqrt(x*x+y*y+z*z);
+    return l>0.0001 ? {x:x/l, y:y/l, z:z/l} : {x:0,y:0,z:1};
+}
+var KEY  = norm3(-0.58, 0.54, 0.68);
+var RIM  = norm3(0.24, -0.36, -0.55);
+var AMBIENT = 0.030;
+var RIM_STR = 0.09;
+
+// ═══ 粒子数据 ═══
+var BULGE_BASE = 9;
+var particles = [];  // {px, py, zf, sign, baseR, sparkle, edge}
+
+function rand() { return Math.random(); }
+
+function generate() {
+    particles = [];
+
+    // ── 轮廓环：均匀 260 点锁死心形边界 ──
+    var edgeN = 260;
+    for (var ei = 0; ei < edgeN; ei++) {
+        var t = (ei/edgeN)*Math.PI*2;
+        var hx=heartX(t), hy=heartY(t);
+        var r=Math.sqrt(hx*hx+hy*hy);
+        particles.push({
+            px:hx, py:hy, zf:0, sign:0,
+            baseR:0.6+rand()*0.45, sparkle:false, edge:true
+        });
+    }
+
+    // ── 前半球：随机散点，轮廓偏置 ──
+    var frontN = 2800;
+    for (var i = 0; i < frontN; i++) {
+        var t = rand()*Math.PI*2;
+        var s = Math.pow(rand(), 0.35);
+        if (s < 0.02) s = 0.02 + rand()*0.03;
+
+        var hx=heartX(t), hy=heartY(t);
+        var px=hx*s, py=hy*s;
+        var zf = Math.sqrt(Math.max(0, 1-s*s));
+
+        particles.push({
+            px:px, py:py, zf:zf, sign:+1,
+            baseR:0.7+rand()*0.7,
+            sparkle:rand()<0.04, edge:false
+        });
+    }
+
+    // ── 背面：去掉。正视角度下背面不可见，反而透过正面粒子间隙造成混乱 ──
+}
+
+// ═══ 动画参数 — 心跳收缩 ═══
+var HEART_RATE   = 1.25;  // Hz ≈ 75 BPM
+var CONTRACT_AMP = 0.14;  // 收缩幅度（三维均匀缩放）
+
+function heartbeat(t) {
+    // 模拟心跳：lub-dub 双脉冲 + 间歇
+    var cycle = (t * HEART_RATE) % 1;
+    var p1 = Math.exp(-Math.pow((cycle - 0.0) / 0.035, 2));  // lub
+    var p2 = Math.exp(-Math.pow((cycle - 0.13) / 0.045, 2)); // dub
+    return (p1 * 0.85 + p2 * 0.55);  // 0→~0.85 的心跳强度
+}
+
+function draw(ts) {
+    resize();
+    var time = ts * 0.001;
+
+    var angleY = 0;
+    var angleX = -0.12;
+    var beat = heartbeat(time);
+    // 三维均匀缩放：收缩时整体变小，舒张时恢复
+    var heartScale = 1 - beat * CONTRACT_AMP;  // 0.88 ~ 1.0
+
+    var cosY=Math.cos(angleY), sinY=Math.sin(angleY);
+    var cosX=Math.cos(angleX), sinX=Math.sin(angleX);
+    var HALF = norm3(KEY.x, KEY.y, KEY.z+1);
+
+    // ── 旋转投影 ──────────────────────
+    var proj = [];
+    for (var i=0; i<particles.length; i++) {
+        var p = particles[i];
+        // 三维均匀缩放：心跳收缩时整体变小
+        var sx = p.px * heartScale;
+        var sy = p.py * heartScale;
+        var sz = p.sign * BULGE_BASE * p.zf * heartScale;
+
+        var x1=sx*cosY + sz*sinY;
+        var z1=-sx*sinY + sz*cosY;
+        var rx=x1;
+        var ry=sy*cosX - z1*sinX;
+        var rz=sy*sinX + z1*cosX;
+
+        // 法线（均匀缩放不影响法线方向，无需重算）
+        var nl = Math.sqrt(sx*sx + sy*sy + sz*sz);
+        if (nl<0.0001) nl=1;
+        var nnx=sx/nl, nny=sy/nl, nnz=sz/nl;
+        var nx1=nnx*cosY + nnz*sinY;
+        var nz1=-nnx*sinY + nnz*cosY;
+        var rnx=nx1;
+        var rny=nny*cosX - nz1*sinX;
+        var rnz=nny*sinX + nz1*cosX;
+
+        proj.push({
+            sx:cx+rx*sc, sy:cy-ry*sc, rz:rz,
+            nx:rnx, ny:rny, nz:rnz,
+            r:p.baseR, sp:p.sparkle, edge:p.edge, zf:p.zf,
+        });
+    }
+
+    proj.sort(function(a,b){ return a.rz - b.rz; });
+
+    // ── 背景 ──────────────────────────
+    var bg=ctx.createRadialGradient(cx,cy-30,0,cx,cy,Math.max(W,H)*0.66);
+    bg.addColorStop(0,'#0a1535'); bg.addColorStop(0.5,'#040b1c'); bg.addColorStop(1,'#010307');
+    ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+
+    var shPulse=heartScale;
+    var gr=ctx.createRadialGradient(cx,cy+sc*5,sc*1.5,cx,cy+sc*3,sc*24);
+    gr.addColorStop(0,'rgba(8,25,80,'+(0.07*shPulse)+')');
+    gr.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=gr; ctx.fillRect(0,0,W,H);
+
+    // ── 逐粒子 ────────────────────────
+    for (var si=0; si<proj.length; si++) {
+        var q=proj[si];
+
+        var NdotL=q.nx*KEY.x+q.ny*KEY.y+q.nz*KEY.z;
+        var NdotR=q.nx*RIM.x+q.ny*RIM.y+q.nz*RIM.z;
+        var bright=AMBIENT+clamp(NdotL,0,1)*0.90+clamp(NdotR,0,1)*RIM_STR;
+
+        var NdotH=q.nx*HALF.x+q.ny*HALF.y+q.nz*HALF.z;
+        var spec=q.sp?Math.pow(clamp(NdotH,0,1),22)*0.72:0;
+
+        var cr,cg,cb;
+        if (bright<0.14){ var t=bright/0.14; cr=lerp(2,5,t); cg=lerp(4,11,t); cb=lerp(11,36,t); }
+        else if (bright<0.34){ var t=(bright-0.14)/0.20; cr=lerp(5,17,t); cg=lerp(11,52,t); cb=lerp(36,132,t); }
+        else if (bright<0.56){ var t=(bright-0.34)/0.22; cr=lerp(17,40,t); cg=lerp(52,124,t); cb=lerp(132,216,t); }
+        else { var t=(bright-0.56)/0.44; cr=lerp(40,122,t); cg=lerp(124,202,t); cb=lerp(216,252,t); }
+        cr=lerp(cr,242,spec); cg=lerp(cg,238,spec); cb=lerp(cb,232,spec);
+        cr=clamp(cr|0,0,255); cg=clamp(cg|0,0,255); cb=clamp(cb|0,0,255);
+
+        var persp=clamp(1+q.rz/50, 0.81, 1.13);
+        // 心跳缩放：离中心越近（zf越大）缩放越明显，边缘不动
+        var br = q.edge ? 1 : (1 + (heartScale-1) * q.zf * 0.8);
+        var sz=q.r*persp*br; if (q.edge) sz*=0.58;
+
+        var viewDot=q.nz;
+        var alpha=0.78+clamp(viewDot,0,1)*0.22+bright*0.06;
+        if (q.sp&&spec>0.03) alpha=Math.min(1,alpha+spec*0.18);
+        if (viewDot<-0.4) alpha*=0.12;
+        alpha=clamp(alpha,0.08,1);
+
+        // 辉光层
+        ctx.beginPath();
+        ctx.arc(q.sx,q.sy,sz*1.35,0,Math.PI*2);
+        ctx.fillStyle='rgba('+cr+','+cg+','+cb+','+(alpha*0.17)+')';
+        ctx.fill();
+        // 实心层
+        ctx.beginPath();
+        ctx.arc(q.sx,q.sy,sz,0,Math.PI*2);
+        ctx.fillStyle='rgba('+cr+','+cg+','+cb+','+alpha+')';
+        ctx.fill();
+    }
+
+    // ── 星芒 ──────────────────────────
+    for (var si=0; si<proj.length; si++) {
+        var q=proj[si]; if (!q.sp) continue;
+        var NdotH=q.nx*HALF.x+q.ny*HALF.y+q.nz*HALF.z;
+        var spec=Math.pow(clamp(NdotH,0,1),22)*0.72;
+        if (spec<0.04) continue;
+        var sl=q.r*2.6*spec;
+        ctx.strokeStyle='rgba(222,245,255,'+(spec*0.36)+')';
+        ctx.lineWidth=0.25;
+        ctx.beginPath();
+        ctx.moveTo(q.sx-sl,q.sy); ctx.lineTo(q.sx+sl,q.sy);
+        ctx.moveTo(q.sx,q.sy-sl); ctx.lineTo(q.sx,q.sy+sl);
+        ctx.stroke();
+    }
+
+    // ── 轮廓线 ────────────────────────
+    var olN=280;
+    ctx.beginPath();
+    for (var oi=0; oi<=olN; oi++) {
+        var t=(oi/olN)*Math.PI*2;
+        var hx=heartX(t), hy=heartY(t);
+        var x1=hx*cosY, z1=-hx*sinY;
+        var rx=x1, ry=hy*cosX-z1*sinX;
+        var sx=cx+rx*sc, sy=cy-ry*sc;
+        if (oi===0) ctx.moveTo(sx,sy); else ctx.lineTo(sx,sy);
+    }
+    ctx.strokeStyle='rgba(170,232,254,0.34)';
+    ctx.lineWidth=0.7;
+    ctx.stroke();
+
+    requestAnimationFrame(draw);
+}
+
+generate();
+requestAnimationFrame(draw);
+
+})();
+</script>
+</body>
+</html>
