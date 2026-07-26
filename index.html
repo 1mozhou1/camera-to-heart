@@ -32,6 +32,7 @@
 </head>
 <body>
 <video id="v" playsinline muted></video>
+<canvas id="cap" width="640" height="480" style="display:none;"></canvas>
 <canvas id="c"></canvas>
 <canvas id="preview" width="160" height="120"></canvas>
 <div id="status">初始化中...</div>
@@ -859,7 +860,10 @@
             }
         });
 
-        await hands.send({image: video});
+        var capCanvas = document.getElementById('cap');
+        var capCtx = capCanvas.getContext('2d');
+        capCtx.drawImage(video, 0, 0, 640, 480);
+        await hands.send({image: capCanvas});
         cameraReady = true;
         setStatus('就绪');
         logDebug('步骤', '追踪已启动');
@@ -869,7 +873,8 @@
         (function feedFrame() {
             frameCount++;
             if (cameraReady) {
-                hands.send({image: video}).catch(function(e){
+                capCtx.drawImage(video, 0, 0, 640, 480);
+                hands.send({image: capCanvas}).catch(function(e){
                     sendErrors++;
                     if (sendErrors <= 3) logDebug('send错误', e.message);
                 });
