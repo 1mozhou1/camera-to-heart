@@ -744,16 +744,21 @@
         var handLandmarker = await HandLandmarker.createFromOptions(vision, {
             baseOptions: {
                 modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-                delegate: 'GPU'
+                delegate: 'CPU'
             },
             runningMode: 'VIDEO',
             numHands: 1,
-            minHandDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.3
+            minHandDetectionConfidence: 0.4,
+            minTrackingConfidence: 0.2
         });
         logDebug('步骤', '检测器就绪');
+        var resultLogCount = 0;
         function processResults(results) {
-            if (results.landmarks && results.landmarks.length > 0) {
+            if (resultLogCount < 5) {
+                resultLogCount++;
+                logDebug('results', results ? 'obj, landmarks:'+(results.landmarks?results.landmarks.length:'null') : 'null');
+            }
+            if (results && results.landmarks && results.landmarks.length > 0) {
                 lastLandmarks = results.landmarks[0];
                 logDebug('手势', '检测到');
                 var lm = lastLandmarks;
