@@ -870,11 +870,16 @@
         if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 800);
         var frameCount = 0;
         var sendErrors = 0;
+        var sending = false;
         (function feedFrame() {
             frameCount++;
-            if (cameraReady) {
+            if (cameraReady && !sending) {
+                sending = true;
                 capCtx.drawImage(video, 0, 0, 640, 480);
-                hands.send({image: capCanvas}).catch(function(e){
+                hands.send({image: capCanvas}).then(function() {
+                    sending = false;
+                }).catch(function(e) {
+                    sending = false;
                     sendErrors++;
                     if (sendErrors <= 3) logDebug('send错误', e.message);
                 });
