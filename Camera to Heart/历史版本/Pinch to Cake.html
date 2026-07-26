@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>粒子海 · 捏合变蛋糕</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #0a0a1a;
+            touch-action: none; /* 核心：禁止浏览器默认手势，避免干扰 */
+        }
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        /* 提示文字 */
+        .hint {
+            position: fixed;
+            bottom: 40px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            color: rgba(255,255,255,0.3);
+            font-family: 'Helvetica Neue', sans-serif;
+            font-size: 14px;
+            letter-spacing: 2px;
+            pointer-events: none;
+            transition: opacity 0.8s;
+        }
+        .hint.hidden { opacity: 0; }
+    </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div class="hint" id="hint">👆 双指捏合 · 唤醒蛋糕</div>
+
+<script>
+    (function(){
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const hint = document.getElementById('hint');
+
+        // --- 尺寸管理 ---
+        let W, H;
+        function resize() {
+            W = canvas.width = window.innerWidth;
+            H = canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- 1. 定义“海”与“蛋糕”的坐标 ---
+        const PARTICLE_COUNT = 800; // 粒子数量
+
+        // 生成随机的“海”坐标 (x, y, 浮动相位)
+        const seaPositions = [];
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            seaPositions.push({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                phase: Math.random() * Math.PI * 2 // 用于浮动
+            });
+        }
+
+        // 生成“蛋糕”形状坐标 (集中在中下区域，呈现蛋糕轮廓)
+        const cakePositions = [];
+        const cx = W / 2;
+        const cy = H * 0.65; // 蛋糕中心偏下
+        const baseRadius = Math.min(W, H) * 0.25;
+
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            let x, y;
+            // 为了让蛋糕有层次感，用随机分布模拟：底层奶油(宽)、草莓(红点)、蜡烛(细长)
+            const type = Math.random();
+            if (type < 0.5) { 
+                // 底层蛋糕体 (椭圆)
+                const angle = Math.random() * Math.PI * 2;
+                const radius = baseRadius * (0.6 + Math.random() * 0.4);
+                x = cx + Math.cos(angle) * radius * 1.2;
+                y = cy + Math.sin(angle) * radius * 0.7 - 10;
+            } else if (type < 0.8) {
+                // 奶油层 / 草莓 (小聚集)
+                const angle = Math.random() * Math.PI * 2;
+                const radius = baseRadius * 0.3 * Math.random();
+                x = cx + Math.cos(angle) * radius * 1.5;
+                y = cy - baseRadius * 0.3 + Math.sin(angle) * radius * 0.6;
+            } else {
+                // 蜡烛 (竖直细条)
+                const candleH = baseRadius * 0.7;
+                x = cx + (Math.random() - 0.5) * 8;
+                y = cy - baseRadius * 0.2 - Math.random() * candleH;
+            }
+            // 边界保护，防止跑出画布
+            cakePositions.push({
+                x: Math.min(W - 5, Math.max(5, x)),
+                y: Math.min(H - 5, Math.max(5, y))
+            });
+        }
+
+        // --- 2. 插值状态 ---
+        let morphProgress = 0; // 0 = 纯海, 1 = 纯蛋糕
+        let targetProgress = 0; // 目标值 (由捏合控制)
+
+        // --- 3. 手势控制 (双指捏合) ---
+        let initialPinchDist = 0;
+        let isPinching = false;
+
+        function getPinchDistance(e) {
+            if (e.touches.length < 2) return 0;
+            const dx = e.touches[0].clientX - e.touches[1].clientX;
+            const dy = e.touches[0].clientY - e.touches[1].clientY;
+            return Math.sqrt(dx*dx + dy*dy);
+        }
+
+        canvas.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 2) {
+                initialPinchDist = getPinchDistance(e);
+                isPinching = true;
+                // 隐藏提示
+                hint.classList.add('hidden');
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault(); // 阻止滚动
+            if (!isPinching || e.touches.length < 2) return;
+
+            const currentDist = getPinchDistance(e);
+            // 计算缩放比例变化：捏合（距离变小） -> progress 增加
+            // 初始距离设为基准，当距离缩小到初始的 30% 时，视为完全变形成蛋糕
+            const scale = currentDist / initialPinchDist;
+            // 将 scale 映射到 0~1，捏得越紧（scale越小），progress越大
+            let newProgress = 1 - (scale - 0.3) / 0.7; 
+            newProgress = Math.min(1, Math.max(0, newProgress));
+            
+            targetProgress = newProgress;
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', (e) => {
+            // 如果手指全部离开，重置捏合状态（但不重置进度，保持当前形态）
+            if (e.touches.length < 2) {
+                isPinching = false;
+            }
+        }, { passive: false });
+
+        // --- 鼠标调试 (在PC上可以用滚轮模拟，方便预览) ---
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? 0.02 : -0.02;
+            targetProgress = Math.min(1, Math.max(0, targetProgress + delta));
+            hint.classList.add('hidden');
+        }, { passive: false });
+
+        // --- 4. 绘制循环 ---
+        function draw() {
+            // 缓动让过渡更丝滑 (每次追目标值)
+            morphProgress += (targetProgress - morphProgress) * 0.08;
+
+            // 清屏
+            ctx.clearRect(0, 0, W, H);
+            
+            // 底色微渐变 (海时深蓝，蛋糕时暖色)
+            const bgGrad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.7);
+            const r = 10 + 20 * morphProgress;
+            const g = 10 + 30 * morphProgress;
+            const b = 40 - 20 * morphProgress;
+            bgGrad.addColorStop(0, `rgb(${r+20}, ${g+10}, ${b+30})`);
+            bgGrad.addColorStop(1, `rgb(${r}, ${g}, ${b})`);
+            ctx.fillStyle = bgGrad;
+            ctx.fillRect(0, 0, W, H);
+
+            // 绘制粒子
+            const time = Date.now() * 0.001;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const sea = seaPositions[i];
+                const cake = cakePositions[i];
+                const p = morphProgress;
+
+                // 插值位置
+                // 海有浮动效果, 蛋糕基本静止 (但可以给蛋糕加一点呼吸)
+                const floatOffset = Math.sin(time * 0.5 + sea.phase) * 3 * (1 - p);
+                const x = sea.x * (1 - p) + cake.x * p + floatOffset * (1 - p);
+                const y = sea.y * (1 - p) + cake.y * p + Math.cos(time * 0.6 + sea.phase) * 2 * (1 - p);
+
+                // 粒子大小和颜色: 海时小且蓝白, 蛋糕时大且暖色
+                const size = (1.5 + Math.random() * 0.5) + p * 3;
+                const alpha = 0.5 + p * 0.5;
+                
+                // 颜色渐变: 蓝 -> 金/红
+                const red = 120 + 135 * p;
+                const green = 180 - 100 * p;
+                const blue = 255 - 200 * p;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, size * 0.6, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(${red|0}, ${green|0}, ${blue|0}, ${alpha})`;
+                ctx.fill();
+            }
+
+            // 如果完全变成蛋糕, 加一点光晕特效
+            if (morphProgress > 0.95) {
+                ctx.shadowColor = 'rgba(255, 200, 100, 0.3)';
+                ctx.shadowBlur = 40;
+                ctx.beginPath();
+                ctx.arc(W/2, H*0.6, 30, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(255, 180, 50, 0.1)';
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+
+            requestAnimationFrame(draw);
+        }
+
+        draw();
+
+        // 如果3秒没操作，显示提示 (防打扰)
+        setTimeout(() => {
+            if (targetProgress === 0) {
+                hint.classList.remove('hidden');
+            }
+        }, 3000);
+
+    })();
+</script>
+</body>
+</html>
