@@ -22,6 +22,12 @@
             background:rgba(0,0,0,0.5); padding:16px 24px; border-radius:8px;
         }
         #status.done { opacity:0; }
+        #debug {
+            position:fixed; top:8px; left:8px; z-index:99;
+            color:#0f0; font:10px/1.5 monospace; pointer-events:none;
+            background:rgba(0,0,0,0.7); padding:6px 10px; border-radius:6px;
+            max-width:90vw; white-space:pre-wrap;
+        }
     </style>
 </head>
 <body>
@@ -29,6 +35,7 @@
 <canvas id="c"></canvas>
 <canvas id="preview" width="160" height="120"></canvas>
 <div id="status">初始化中...</div>
+<div id="debug"></div>
 <script>
 (function(){
     var video  = document.getElementById('v');
@@ -656,20 +663,42 @@
 
     // ═══════════════ 摄像头 + MediaPipe ═════════════
     var statusEl = document.getElementById('status');
+    var debugEl = document.getElementById('debug');
     function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
+    function logDebug(key, val) {
+        if (!debugEl) return;
+        var lines = debugEl.textContent.split('\n').filter(function(l){ return l; });
+        var found = false;
+        for (var i=0; i<lines.length; i++) {
+            if (lines[i].indexOf(key+':')===0) { lines[i]=key+': '+val; found=true; break; }
+        }
+        if (!found) lines.push(key+': '+val);
+        if (lines.length > 12) lines.shift();
+        debugEl.textContent = lines.join('\n');
+    }
 
     (async function initCamera() {
         // ── 摄像头权限 ──
         setStatus('请求摄像头权限...');
+        logDebug('步骤', '请求摄像头');
+        logDebug('UA', navigator.userAgent.slice(0,40));
         try {
             var stream = await Promise.race([
-                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } }),
-                new Promise(function(_, reject) { setTimeout(function(){ reject(new Error('timeout')); }, 10000); })
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: {ideal:640}, height: {ideal:480} } }),
+                new Promise(function(_, reject) { setTimeout(function(){ reject(new Error('timeout')); }, 15000); })
             ]);
             video.srcObject = stream;
-            await video.play();
+            logDebug('摄像头', '已获取 stream');
+            try {
+                await video.play();
+                logDebug('视频播放', 'playing');
+            } catch(pe) {
+                logDebug('视频播放错误', pe.message);
+            }
             cameraActive = true;
+            logDebug('摄像头', '就绪');
         } catch(e) {
+            logDebug('摄像头错误', e.message);
             setStatus(e.message==='timeout' ? '摄像头超时\n纯动画模式运行中' : '摄像头权限未开启\n纯动画模式运行中');
             if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 3000);
             return;
@@ -677,6 +706,7 @@
 
         // ── CDN双源加载 ──
         setStatus('加载手势模型...');
+        logDebug('步骤', '加载MediaPipe');
         var CDN_LIST = [
             'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js',
             'https://unpkg.com/@mediapipe/hands@0.4/hands.js'
@@ -685,23 +715,25 @@
             return new Promise(function(resolve, reject) {
                 var s = document.createElement('script');
                 s.src = src;
-                var timer = setTimeout(function(){ s.onerror=null; reject(new Error('timeout: '+src)); }, 10000);
-                s.onload = function(){ clearTimeout(timer); resolve(); };
-                s.onerror = function(){ clearTimeout(timer); reject(new Error('load fail: '+src)); };
+                var timer = setTimeout(function(){ s.onerror=null; reject(new Error('timeout: '+src)); }, 15000);
+                s.onload = function(){ clearTimeout(timer); logDebug('CDN加载', 'OK: '+src.slice(0,50)); resolve(); };
+                s.onerror = function(){ clearTimeout(timer); logDebug('CDN失败', src.slice(0,50)); reject(new Error('load fail: '+src)); };
                 document.head.appendChild(s);
             });
         }
         var loaded = false;
         for (var cdi = 0; cdi < CDN_LIST.length; cdi++) {
             try { await loadScript(CDN_LIST[cdi]); loaded = true; break; }
-            catch(e) { console.log('CDN失败:', CDN_LIST[cdi]); }
+            catch(e) { logDebug('CDN异常', e.message); }
         }
         if (!loaded || !window.Hands) {
+            logDebug('MediaPipe', '加载失败!');
             setStatus('手势模型加载失败\n纯动画模式运行中');
             cameraActive = true; cameraReady = true;
             if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 3000);
             return;
         }
+        logDebug('MediaPipe', '已加载');
 
         var Hands = window.Hands;
         var hands = new Hands({
@@ -716,6 +748,7 @@
         hands.onResults(function(results) {
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 lastLandmarks = results.multiHandLandmarks[0];
+                logDebug('手势', '检测到');
                 var lm = lastLandmarks;
                 lostFrames = 0;
 
@@ -808,6 +841,7 @@
             } else {
                 lastLandmarks = null;
                 lostFrames++;
+                if (lostFrames % 30 === 1) logDebug('手势', '未检测到 x'+lostFrames);
                 // 1~2帧：速度预测补位
                 if (lostFrames <= 2 && smoothHandX !== null) {
                     smoothHandX += handVelX; smoothHandY += handVelY;
@@ -828,9 +862,19 @@
         await hands.send({image: video});
         cameraReady = true;
         setStatus('就绪');
+        logDebug('步骤', '追踪已启动');
         if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 800);
+        var frameCount = 0;
+        var sendErrors = 0;
         (function feedFrame() {
-            if (cameraReady) hands.send({image: video}).catch(function(){});
+            frameCount++;
+            if (cameraReady) {
+                hands.send({image: video}).catch(function(e){
+                    sendErrors++;
+                    if (sendErrors <= 3) logDebug('send错误', e.message);
+                });
+            }
+            if (frameCount % 60 === 0) logDebug('帧数', frameCount+' (err:'+sendErrors+')');
             requestAnimationFrame(feedFrame);
         })();
     })();
