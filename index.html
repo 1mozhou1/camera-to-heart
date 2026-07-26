@@ -32,7 +32,7 @@
 </head>
 <body>
 <video id="v" playsinline muted></video>
-<canvas id="cap" width="640" height="480" style="display:none;"></canvas>
+<canvas id="cap" width="640" height="480" style="position:absolute;left:-9999px;top:0;"></canvas>
 <canvas id="c"></canvas>
 <canvas id="preview" width="160" height="120"></canvas>
 <div id="status">初始化中...</div>
@@ -876,6 +876,10 @@
             if (cameraReady && !sending) {
                 sending = true;
                 capCtx.drawImage(video, 0, 0, 640, 480);
+                if (frameCount === 10) {
+                    var pd = capCtx.getImageData(320, 240, 1, 1).data;
+                    logDebug('像素(320,240)', 'R:'+pd[0]+' G:'+pd[1]+' B:'+pd[2]);
+                }
                 hands.send({image: capCanvas}).then(function() {
                     sending = false;
                 }).catch(function(e) {
