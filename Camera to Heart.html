@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Camera to Heart</title>
+    <style>
+        body { margin:0; overflow:hidden; background:#020a18; touch-action:none; }
+        canvas { display:block; width:100vw; height:100vh; }
+        video  { position:fixed; top:0; left:0; opacity:0; pointer-events:none; width:1px; height:1px; }
+        #preview {
+            position:fixed; bottom:16px; right:16px;
+            width:160px; height:120px; border-radius:12px;
+            border:1px solid rgba(255,255,255,0.2); z-index:10; background:#000;
+            transition: opacity 0.4s, transform 0.4s;
+        }
+        #preview.dimmed { opacity:0.5; transform:scale(0.5); transform-origin:bottom right; }
+        #status {
+            position:fixed; top:50%; left:50%; transform:translate(-50%,-50%);
+            color:rgba(255,255,255,0.7); font:14px/1.8 monospace; text-align:center;
+            pointer-events:none; z-index:5; transition:opacity 0.5s;
+            background:rgba(0,0,0,0.5); padding:16px 24px; border-radius:8px;
+        }
+        #status.done { opacity:0; }
+    </style>
+</head>
+<body>
+<video id="v" playsinline></video>
+<canvas id="c"></canvas>
+<canvas id="preview" width="160" height="120"></canvas>
+<div id="status">初始化中...</div>
+<script>
+(function(){
+    var video  = document.getElementById('v');
+    var canvas = document.getElementById('c');
+    var ctx    = canvas.getContext('2d');
+    var preview    = document.getElementById('preview');
+    var previewCtx = preview.getContext('2d');
+
+    // ═══════════════════ 常量（自适应）═══════════════
+    var quality,SEA_N,HEART_N,SPLASH_N,SHATTER_N,GLOW_N;
+
+    var HAND_CONNECTIONS = [
+        [0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],
+        [0,9],[9,10],[10,11],[11,12],[0,13],[13,14],[14,15],[15,16],
+        [0,17],[17,18],[18,19],[19,20],[5,9],[9,13],[13,17]
+    ];
+
+    // ═══════════════════ 尺寸 ═══════════════════════
+    var W, H, heartCx, heartCy, heartScale, seaTop;
+    function resize() {
+        W = canvas.width  = window.innerWidth;
+        H = canvas.height = window.innerHeight;
+        quality  = Math.min(1, Math.min(W, H) / 700);
+        SEA_N    = Math.floor(4000 * quality);
+        HEART_N  = Math.floor(3000 * quality);
+        SPLASH_N = Math.floor(200 * quality);
+        SHATTER_N= Math.floor(1500 * quality);
+        GLOW_N    = Math.floor(50 * quality);
+        SPARKLE_N = Math.floor(80 * quality);
+        seaTop = H * 0.65;
+        heartScale = Math.min(W, H) * 0.011;
+        heartCx = W / 2;
+        heartCy = seaTop - 17 * heartScale;
+    }
+    window.addEventListener('resize', function() { resize(); generateAll(); });
+    resize();
+
+    // ═══════════════ Gerstner 2D 波面 ═════════════
+    function surfaceY2D(x, sz, time) {
+        var y = seaTop;
+        y += Math.sin(x*0.006 + time*1.2)  * 14;
+        y += Math.sin(x*0.013 + time*0.7)  * 9;
+        y += Math.cos(x*0.021 + time*0.5)  * 6;
+        y += Math.sin(sz*12 + time*0.8)     * 4;
+        y += Math.cos(sz*18 + time*1.1)     * 3;
+        return y;
+    }
+    function surfaceY1D(x, time) { return surfaceY2D(x, 0.5, time); }
+
+    // ══════════ 3D爱心几何：平滑曲线 + 球面鼓出 ══════════
+    function heartX(t) { return 16 * Math.pow(Math.sin(t), 3); }
+    function heartY(t) { return -(13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t)); }
+    function norm3(x,y,z) { var l=Math.sqrt(x*x+y*y+z*z); return l>0.0001 ? {x:x/l,y:y/l,z:z/l} : {x:0,y:0,z:1}; }
+    var L_KEY   = norm3(-0.58, 0.56, 0.70);   // 主光源
+    var L_RIM   = norm3(0.22, -0.34, -0.58);  // 边缘补光
+    var L_AMB   = 0.035;                       // 环境光底线
+    var L_RIM_S = 0.10;                        // 边缘光强度
+    var BULGE   = 10.5;                        // 球面鼓出幅度
+
+    // ═══════════════ 粒子生成 ═════════════════════
+    var seaParticles   = [];
+    var heartParticles = [];
+
+    function generateAll() {
+        // ── 海粒子：深度层次 + 尺寸梯度 + 漂流 ──
+        seaParticles = [];
+        for (var i = 0; i < SEA_N; i++) {
+            var depthRand = Math.random();
+            var depth, sizeClass;
+            if (depthRand < 0.25)       { depth = Math.random()*0.12; sizeClass = 2; }
+            else if (depthRand < 0.55)  { depth = 0.12+Math.random()*0.28; sizeClass = 1; }
+            else if (depthRand < 0.82)  { depth = 0.40+Math.random()*0.30; sizeClass = 0; }
+            else                        { depth = 0.70+Math.random()*0.30; sizeClass = 0; }
+            seaParticles.push({
+                nx: Math.random(), sz: Math.random(),
+                depth: depth, wp: Math.random()*Math.PI*2,
+                baseR: sizeClass===2 ? 1.5+Math.random()*2.5 : (sizeClass===1 ? 0.8+Math.random()*1.5 : 0.4+Math.random()*0.8),
+                hueShift: (Math.random()-0.5)*0.06,
+                driftPh: Math.random()*Math.PI*2, driftSpd: 0.2+Math.random()*0.6,
+            });
+        }
+
+        // ── 爱心粒子：3D球面鼓出 ──
+        heartParticles = [];
+
+        // 轮廓环：260点精确锁在边缘（zf≈0）
+        var edgeN = 260;
+        for (var ei = 0; ei < edgeN; ei++) {
+            var t = (ei/edgeN)*Math.PI*2;
+            var hx = heartX(t), hy = heartY(t);
+            heartParticles.push({
+                hx:hx, hy:hy, pz:0, sign:0, edge:true, sparkle:false,
+                threshold: Math.random()*0.6, t:t,
+                fountainAngle: Math.random()*Math.PI*2, fountainDist: 0.2+Math.random()*1.0,
+                syOff: Math.random()*8, swayPh: Math.random()*Math.PI*2,
+                baseR: 0.6+Math.random()*0.5, alphaBase: 0.6+Math.random()*0.4,
+            });
+        }
+
+        // 前半球穹顶：2740粒子，球面鼓出
+        var domeN = 2740;
+        for (var i = 0; i < domeN; i++) {
+            var t = Math.random() * Math.PI * 2;
+            var s = Math.pow(Math.random(), 0.38);
+            if (s < 0.015) s = 0.015 + Math.random()*0.03;
+            var hx = heartX(t), hy = heartY(t);
+            var zf = Math.sqrt(Math.max(0, 1 - s*s));
+            heartParticles.push({
+                hx: hx*s, hy: hy*s, pz: BULGE*zf, sign: +1,
+                edge: false, sparkle: Math.random() < 0.04,
+                threshold: Math.random()*0.6, t:t,
+                fountainAngle: Math.random()*Math.PI*2, fountainDist: 0.2+Math.random()*1.0,
+                syOff: Math.random()*8, swayPh: Math.random()*Math.PI*2,
+                baseR: 0.7+Math.random()*0.8, alphaBase: 0.35+Math.random()*0.45,
+            });
+        }
+
+        // 后半球：自转时补全背面
+        var backN = 2000;
+        for (var ib = 0; ib < backN; ib++) {
+            var bt = Math.random() * Math.PI * 2;
+            var bs = Math.pow(Math.random(), 0.38);
+            if (bs < 0.015) bs = 0.015 + Math.random()*0.03;
+            var bhx = heartX(bt), bhy = heartY(bt);
+            var bzf = Math.sqrt(Math.max(0, 1 - bs*bs));
+            heartParticles.push({
+                hx: bhx*bs, hy: bhy*bs, pz: -BULGE*bzf, sign: -1,
+                edge: false, sparkle: false,
+                threshold: Math.random()*0.6, t: bt,
+                fountainAngle: Math.random()*Math.PI*2, fountainDist: 0.2+Math.random()*1.0,
+                syOff: Math.random()*8, swayPh: Math.random()*Math.PI*2,
+                baseR: 0.7+Math.random()*0.7, alphaBase: 0.28+Math.random()*0.32,
+            });
+        }
+
+        // 预收集边缘粒子（边光晕用）
+        edgeParticles = [];
+        for (var ei2 = 0; ei2 < heartParticles.length; ei2++) {
+            if (heartParticles[ei2].edge) edgeParticles.push(heartParticles[ei2]);
+        }
+
+        // ── 溅射粒子池 ──
+        splashPool = [];
+        for (var si = 0; si < SPLASH_N; si++) {
+            splashPool.push({ alive: false, x:0, y:0, vx:0, vy:0, life:0, maxLife:0, r:0, cr:0, cg:0, cb:0 });
+        }
+        splashNext = 0;
+        // ── 海底微光 ──
+        seafloorGlows = [];
+        for (var gi = 0; gi < GLOW_N; gi++) {
+            seafloorGlows.push({
+                x: Math.random()*W, y: H*(0.88+Math.random()*0.12),
+                phase: Math.random()*Math.PI*2, alpha: 0.04+Math.random()*0.12,
+                r: 1.5+Math.random()*3.5, warm: Math.random()<0.5,
+                driftAmp: 5+Math.random()*20, driftPh: Math.random()*Math.PI*2,
+            });
+        }
+        // ── 崩散粒子池 ──
+        shatterPool = [];
+        for (var sh=0; sh<SHATTER_N; sh++) {
+            shatterPool.push({ alive:false, x:0,y:0, vx:0,vy:0, life:0, r:0, cr:0,cg:0,cb:0, alpha:0 });
+        }
+        // ── 闪烁粒子池 ──
+        sparklePool = [];
+        for (var sk = 0; sk < SPARKLE_N; sk++) {
+            sparklePool.push({ alive:false, x:0,y:0, vx:0,vy:0, life:0, maxLife:0, r:0, alpha:0, cr:255,cg:220,cb:160 });
+        }
+        sparkleNext = 0;
+    }
+    var edgeParticles = [];
+    var splashPool = [], splashNext = 0;
+    var shatterPool = [], shatterNext = 0;
+    var sparklePool = [], sparkleNext = 0;
+    var seafloorGlows = [];
+    var ripples = [];
+    generateAll();
+
+    // ═══════════════ 控制状态 ═══════════════════════
+    var morphPinch = 0, springVelocity = 0;
+    var SPRING_STIFFNESS = 0.3, SPRING_DAMPING = 0.85;
+    var cameraReady = false, handDetected = false;
+    var smoothHandX = null, smoothHandY = null;
+    var lastLandmarks = null, cameraActive = false;
+    var pinchOpenRef = 0.08, pinchCloseRef = 0.01;
+    var pinchProgress = 0, smoothRaw = 0, pinchLocked = false;
+    var lockedFrames = 0, lostFrames = 0;
+    var handVelX = 0, handVelY = 0;
+    var handSpeed = 0, predFrames = 0;
+    var initPinchOpen = 0, initPinchClose = 0;
+    var dbFrames = 0, lastState = 0; // 0=none 1=open 2=rising 3=locked
+    var shatterActive = false, shatterFrame = 0;
+    var prevPinchForShatter = 0;
+
+    // ═══════════════ 工具 ═══════════════════════════
+    function lerp(a,b,t) { return a+(b-a)*t; }
+    function clamp(v,lo,hi) { return v<lo?lo:v>hi?hi:v; }
+    function lerpRGB(c1,c2,t) { return [lerp(c1[0],c2[0],t), lerp(c1[1],c2[1],t), lerp(c1[2],c2[2],t)]; }
+
+    // ═══════════════ 渲染 ═══════════════════════════
+    function draw(ts) {
+        var time = ts * 0.001;
+
+        // ── 弹簧 + 钳位 ──────────────────
+        var pTarget = cameraReady ? pinchProgress : 0;
+        springVelocity += (pTarget - morphPinch) * SPRING_STIFFNESS - springVelocity * SPRING_DAMPING;
+        morphPinch += springVelocity;
+        morphPinch = clamp(morphPinch, 0, 1.05);
+        var p = morphPinch;
+
+        // ── 爱心缓随 ─────────────────────
+        if (smoothHandX !== null) {
+            heartCx += (smoothHandX - heartCx) * 0.06;
+            heartCy += (smoothHandY - heartCy) * 0.06;
+        }
+        var hcx = heartCx, hcy = heartCy;
+
+        // ── 呼吸 ─────────────────────────
+        var breath = 1;
+        if (p > 0.7) {
+            var bf = (p - 0.7) / 0.3;
+            breath = 1 + 0.025 * Math.sin(time * 3.2) * bf;
+        }
+
+        // ── 崩散检测：锁定解除瞬间触发 ──
+        if (!shatterActive && prevPinchForShatter && !pinchLocked) {
+            shatterActive = true; shatterFrame = 0;
+            var sampleStep = Math.max(1, Math.floor(heartParticles.length / SHATTER_N));
+            for (var hi = 0; hi < heartParticles.length; hi += sampleStep) {
+                if (shatterNext >= SHATTER_N) break;
+                var hp = heartParticles[hi];
+                var shx = hcx + hp.hx*heartScale*breath;
+                var shy = hcy + hp.hy*heartScale*breath;
+                var sp3 = shatterPool[shatterNext];
+                sp3.alive = true; sp3.x = shx; sp3.y = shy;
+                sp3.vx = (Math.random()-0.5)*10; sp3.vy = -(3+Math.random()*12);
+                sp3.life = 0; sp3.r = hp.baseR*1.8; sp3.alpha = 1.0;
+                sp3.cr = 250; sp3.cg = 120+Math.random()*80; sp3.cb = 150+Math.random()*80;
+                shatterNext = (shatterNext+1) % SHATTER_N;
+            }
+        }
+        prevPinchForShatter = pinchLocked;
+
+        // ── 背景 + 环境光 ───────────────
+        var ambientMix = p > 0.5 ? (p - 0.5) / 0.5 : 0;
+        var bgTop = lerpRGB([3,10,32], [10,14,42], p * 0.55);
+        var bgBot = lerpRGB([2,5,18],  [4,3,14],  p * 0.3);
+        var grad = ctx.createLinearGradient(0, 0, 0, H);
+        grad.addColorStop(0, 'rgb('+(bgTop[0]|0)+','+(bgTop[1]|0)+','+(bgTop[2]|0)+')');
+        grad.addColorStop(1, 'rgb('+(bgBot[0]|0)+','+(bgBot[1]|0)+','+(bgBot[2]|0)+')');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, W, H);
+
+        // ── 环形涟漪管理 ──
+        if (ripples.length < 5 && Math.random() < 0.008) {
+            ripples.push({ cx: Math.random()*W, cy: seaTop + Math.random()*H*0.3, start: time, life: 3.5 });
+        }
+        for (var ri2 = ripples.length-1; ri2 >= 0; ri2--) {
+            if (time - ripples[ri2].start > ripples[ri2].life) { ripples.splice(ri2, 1); }
+        }
+
+        // ── 海粒子（2D Gerstner + 波峰高光 + 涟漪）──
+        for (var si = 0; si < seaParticles.length; si++) {
+            var sp = seaParticles[si];
+            var sx = sp.nx * W + Math.sin(time*sp.driftSpd + sp.driftPh) * 15 * sp.driftSpd;
+            var surfY = surfaceY2D(sx, sp.sz, time);
+            // 涟漪叠加
+            for (var rj = 0; rj < ripples.length; rj++) {
+                var rip = ripples[rj];
+                var rAge = (time - rip.start) / rip.life;
+                var rR = rAge * Math.max(W,H) * 0.8;
+                var rDist = Math.hypot(sx-rip.cx, sp.sz*H*0.3 - rip.cy + seaTop);
+                var rPhase = (rDist - rR) / 25;
+                var rDecay = Math.exp(-rAge*2.5) * (1 - rAge);
+                surfY += Math.sin(rPhase) * 10 * rDecay * clamp(1 - Math.abs(rDist-rR)/50, 0, 1);
+            }
+            var bottomY = H + 10;
+            var sy = surfY + sp.depth * (bottomY - surfY);
+            sy = Math.max(surfY, Math.min(H+5, sy));
+            var dk = sp.depth;
+            var heightOff = surfY - seaTop;
+            var troughDark = clamp(-heightOff/20, 0, 0.35);
+            var sSize = sp.baseR * (0.9 - dk*0.5) * (1 + clamp(heightOff/25, 0, 0.2));
+            var sAlpha = (0.65 - dk*0.4) * (1 - troughDark);
+            var peakBoost = 1 + clamp(heightOff / 25, -0.5, 0.85);
+            var sr = clamp((50 + sp.hueShift*180) * peakBoost, 0, 255);
+            var sg = clamp((150 + sp.hueShift*120) * peakBoost, 0, 255);
+            var sb = clamp((215 + sp.hueShift*60) * peakBoost, 0, 255);
+            // 波峰泡沫
+            var foam = 0;
+            if (sp.depth < 0.05 && heightOff > 6) {
+                foam = clamp((heightOff - 6) / 14, 0, 1) * (1 - sp.depth / 0.05);
+                sr = lerp(sr, 210, foam * 0.75);
+                sg = lerp(sg, 225, foam * 0.75);
+                sb = lerp(sb, 245, foam * 0.75);
+                sAlpha = lerp(sAlpha, Math.min(1, sAlpha * 1.6), foam);
+            }
+            // 爱心柔光染色：附近海面粒子染粉
+            if (p > 0.3) {
+                var heartDist = Math.hypot(sx - hcx, sy - hcy);
+                var glowR2 = heartScale * 18;
+                if (heartDist < glowR2) {
+                    var glowInfluence = (1 - heartDist/glowR2) * (p - 0.3) / 0.7 * 0.45;
+                    glowInfluence = clamp(glowInfluence, 0, 0.45);
+                    sr = lerp(sr, 210, glowInfluence);
+                    sg = lerp(sg, 130, glowInfluence);
+                    sb = lerp(sb, 170, glowInfluence);
+                    sAlpha = lerp(sAlpha, Math.min(1, sAlpha*1.3), glowInfluence);
+                }
+            }
+            ctx.beginPath();
+            ctx.arc(sx, sy, sSize, 0, Math.PI*2);
+            ctx.fillStyle = 'rgba('+(sr|0)+','+(sg|0)+','+(sb|0)+','+sAlpha+')';
+            ctx.fill();
+        }
+
+        // ── 海底微光 ────────────────────
+        for (var gi = 0; gi < GLOW_N; gi++) {
+            var gf = seafloorGlows[gi];
+            var gx = gf.x + Math.cos(time*0.2+gf.driftPh)*gf.driftAmp;
+            var gy = gf.y + Math.sin(time*0.3+gf.driftPh)*gf.driftAmp*0.5;
+            var ga = gf.alpha*(0.7+0.3*Math.sin(time*0.5+gf.phase));
+            ctx.beginPath();
+            ctx.arc(gx, gy, gf.r, 0, Math.PI*2);
+            ctx.fillStyle = gf.warm ? 'rgba(180,170,110,'+ga+')' : 'rgba(70,140,100,'+ga+')';
+            ctx.fill();
+        }
+
+
+        // ── 溅射粒子（统一融合：触海→冰蓝渐隐）──
+        for (var spi = 0; spi < SPLASH_N; spi++) {
+            var sp = splashPool[spi];
+            if (!sp.alive) continue;
+            sp.life += 0.016;
+            sp.vy += 0.15; sp.x += sp.vx; sp.y += sp.vy;
+            var surfSplash = surfaceY1D(sp.x, time);
+            var seaMerge = 0;
+            if (sp.y >= surfSplash - 3) {
+                seaMerge = clamp((sp.y - surfSplash + 3) / 28, 0, 1);
+                sp.vy *= 0.85; sp.vx *= 0.92;
+            }
+            if (sp.life >= sp.maxLife || seaMerge >= 1) { sp.alive = false; continue; }
+            var frac = clamp(sp.life/sp.maxLife + seaMerge, 0, 1);
+            var sa = (1-frac)*0.7;
+            var sr = lerp(lerp(sp.cr, 60, seaMerge), 50, frac);
+            var sg = lerp(lerp(sp.cg, 160, seaMerge), 150, frac);
+            var sb = lerp(lerp(sp.cb, 220, seaMerge), 215, frac);
+            ctx.beginPath();
+            ctx.arc(sp.x, sp.y, Math.max(0.2, sp.r*(1-frac*0.6)), 0, Math.PI*2);
+            ctx.fillStyle = 'rgba('+(sr|0)+','+(sg|0)+','+(sb|0)+','+sa+')';
+            ctx.fill();
+        }
+
+        // ═══ 3D爱心：自转 + 投影 + 深度排序 + Phong光照 ═══
+        var selfAngle = time * 0.35;
+        var cosSA = Math.cos(selfAngle), sinSA = Math.sin(selfAngle);
+        var tiltX = -0.10, cosTX = Math.cos(tiltX), sinTX = Math.sin(tiltX);
+        var HALF = norm3(L_KEY.x, L_KEY.y, L_KEY.z+1);
+
+        // 收集投影
+        var proj = [];
+        for (var hi = 0; hi < heartParticles.length; hi++) {
+            var hp = heartParticles[hi];
+            var ep = clamp((p - 0.08 - hp.threshold) / (0.8 - hp.threshold), 0, 1);
+            if (ep < 0.002) { hp.prevX = undefined; continue; }
+
+            // ── 3D目标位置（旋转后）──
+            var p3x = hp.hx * heartScale * breath;
+            var p3y = hp.hy * heartScale * breath;
+            var p3z = hp.pz * heartScale * breath;
+            var rx1 = p3x*cosSA + p3z*sinSA;
+            var rz1 = -p3x*sinSA + p3z*cosSA;
+            var t3x = hcx + rx1;
+            var t3y = hcy + p3y*cosTX - rz1*sinTX;
+            var t3z = p3y*sinTX + rz1*cosTX;
+
+            // ── 起飞位置（从手掌周围散开再聚拢）──
+            var flowBase = hcy + 40;
+            var liftY = flowBase - ep * (H * 0.3);
+            var flowY = flowBase + hp.syOff + (liftY - flowBase) * ep;
+            var flowFrac = liftY < flowBase ? clamp((flowY-flowBase)/(liftY-flowBase+0.001), 0, 1) : 0;
+            var colR = heartScale*1.5 + flowFrac*heartScale*5*hp.fountainDist;
+            var flowX = hcx + Math.cos(hp.fountainAngle)*colR*ep;
+            var flowSY = flowBase + hp.syOff + (liftY-flowBase)*ep;
+
+            // ── 聚拢 ──
+            var converge = Math.pow(ep, 1.8);
+            var cx = lerp(flowX, t3x, converge);
+            var cy = lerp(flowSY, t3y, converge);
+            var spiral = converge*(1-converge)*Math.sin(time*2.5+hp.fountainAngle)*0.7;
+            var sc = Math.cos(spiral), ss = Math.sin(spiral);
+            var dx = cx-hcx, dy = cy-hcy;
+            cx = hcx + dx*sc - dy*ss;
+            cy = hcy + dx*ss + dy*sc;
+            var sway = Math.sin(ep*Math.PI*3 + hp.swayPh)*(1-converge)*18*ep;
+            var sx = cx + sway, sy = cy;
+
+            // ── 粒子游离：5%表层粒子沿法线漂移 ──
+            var driftSeed = ((hp.t*7919)%1 + (hp.hx*3571)%1) % 1;
+            if (driftSeed < 0.05 && hp.pz > 0.1 && hp.pz < BULGE*0.35) {
+                var driftAmt = Math.sin(time*3.2 + driftSeed*110) * hp.baseR * 2.5;
+                var driftDx = Math.cos(hp.t);
+                var driftDy = Math.sin(hp.t)*0.7;
+                sx += driftDx * driftAmt; sy += driftDy * driftAmt;
+            }
+
+            // ── 旋转法线 ──
+            var nl = Math.sqrt(p3x*p3x + p3y*p3y + p3z*p3z);
+            if (nl < 0.0001) nl = 1;
+            var nnx = p3x/nl, nny = p3y/nl, nnz = p3z/nl;
+            var nrx1 = nnx*cosSA + nnz*sinSA;
+            var nrz1 = -nnx*sinSA + nnz*cosSA;
+            var rnx = nrx1;
+            var rny = nny*cosTX - nrz1*sinTX;
+            var rnz = nny*sinTX + nrz1*cosTX;
+
+            proj.push({
+                sx:sx, sy:sy, rz:t3z,
+                nx:rnx, ny:rny, nz:rnz,
+                r:hp.baseR, edge:hp.edge, sparkle:hp.sparkle,
+                ep:ep, converge:converge, alphaBase:hp.alphaBase, hi:hi,
+            });
+        }
+
+        // 深度排序
+        proj.sort(function(a,b){ return a.rz - b.rz; });
+
+        // 逐粒子渲染
+        for (var pi = 0; pi < proj.length; pi++) {
+            var q = proj[pi];
+            var ep = q.ep, converge = q.converge;
+
+            // ── Phong光照 ──
+            var NdotL = q.nx*L_KEY.x + q.ny*L_KEY.y + q.nz*L_KEY.z;
+            var NdotR = q.nx*L_RIM.x + q.ny*L_RIM.y + q.nz*L_RIM.z;
+            var bright = L_AMB + clamp(NdotL,0,1)*0.90 + clamp(NdotR,0,1)*L_RIM_S;
+
+            // Phong镜面
+            var NdotH = q.nx*HALF.x + q.ny*HALF.y + q.nz*HALF.z;
+            var spec = q.sparkle ? Math.pow(clamp(NdotH,0,1), 20)*0.65 : 0;
+
+            // ── 颜色（粉雾→蜜桃 渐变）──
+            var cr, cg, cb;
+            if (bright < 0.14)      { var t=bright/0.14; cr=lerp(80,120,t); cg=lerp(20,40,t); cb=lerp(40,65,t); }
+            else if (bright < 0.34) { var t=(bright-0.14)/0.20; cr=lerp(120,195,t); cg=lerp(40,90,t); cb=lerp(65,120,t); }
+            else if (bright < 0.56) { var t=(bright-0.34)/0.22; cr=lerp(195,235,t); cg=lerp(90,150,t); cb=lerp(120,180,t); }
+            else                    { var t=(bright-0.56)/0.44; cr=lerp(235,252,t); cg=lerp(150,210,t); cb=lerp(180,230,t); }
+            cr = lerp(cr, 250, spec); cg = lerp(cg, 242, spec); cb = lerp(cb, 235, spec);
+            cr = clamp(cr|0, 0, 255); cg = clamp(cg|0, 0, 255); cb = clamp(cb|0, 0, 255);
+
+            // ── 可见性 ──
+            var cSize = lerp(q.r*0.3, q.r*0.9, ep);
+            var cAlpha = lerp(0, q.alphaBase, ep);
+            if (q.edge) cSize *= 0.55;
+            var viewDot = q.nz;
+            cAlpha = cAlpha * (0.78 + clamp(viewDot,0,1)*0.22 + bright*0.06);
+            if (viewDot < -0.4) cAlpha *= 0.12;
+            if (q.sparkle && spec > 0.03) cAlpha = Math.min(1, cAlpha + spec*0.18);
+            cAlpha = clamp(cAlpha, 0.05, 1);
+
+            // ── 透视 ──
+            var persp = clamp(1 + q.rz/55, 0.80, 1.14);
+            var sz = cSize * persp;
+
+            // 辉光层
+            ctx.beginPath();
+            ctx.arc(q.sx, q.sy, sz*1.35, 0, Math.PI*2);
+            ctx.fillStyle = 'rgba('+cr+','+cg+','+cb+','+(cAlpha*0.17)+')';
+            ctx.fill();
+            // 实心层
+            ctx.beginPath();
+            ctx.arc(q.sx, q.sy, Math.max(0.3, sz), 0, Math.PI*2);
+            ctx.fillStyle = 'rgba('+cr+','+cg+','+cb+','+cAlpha+')';
+            ctx.fill();
+        }
+
+        // ── 星芒（镜面粒子十字闪光）──
+        for (var pi2 = 0; pi2 < proj.length; pi2++) {
+            var q2 = proj[pi2];
+            if (!q2.sparkle) continue;
+            var NdotH2 = q2.nx*HALF.x + q2.ny*HALF.y + q2.nz*HALF.z;
+            var spec2 = Math.pow(clamp(NdotH2,0,1), 20)*0.65;
+            if (spec2 < 0.04) continue;
+            var sl = q2.r * 2.6 * spec2;
+            ctx.strokeStyle = 'rgba(250,242,235,'+(spec2*0.32)+')';
+            ctx.lineWidth = 0.25;
+            ctx.beginPath();
+            ctx.moveTo(q2.sx-sl, q2.sy); ctx.lineTo(q2.sx+sl, q2.sy);
+            ctx.moveTo(q2.sx, q2.sy-sl); ctx.lineTo(q2.sx, q2.sy+sl);
+            ctx.stroke();
+        }
+
+        // ── 轮廓线 ──
+        if (p > 0.2) {
+            var olN = 280, olAlpha = shatterActive ? 0 : clamp((p-0.2)/0.5, 0, 1)*0.15;
+            ctx.beginPath();
+            for (var oi = 0; oi <= olN; oi++) {
+                var ot = (oi/olN)*Math.PI*2;
+                var ohx = heartX(ot), ohy = heartY(ot);
+                var orx1 = ohx*cosSA, orz1 = -ohx*sinSA;
+                var osx = hcx + orx1*heartScale*breath;
+                var osy = hcy + (ohy*cosTX - orz1*sinTX)*heartScale*breath;
+                if (oi===0) ctx.moveTo(osx,osy); else ctx.lineTo(osx,osy);
+            }
+            ctx.strokeStyle = 'rgba(245,185,200,'+olAlpha+')';
+            ctx.lineWidth = 0.6;
+            ctx.stroke();
+        }
+
+        // ── 外层柔光 ──
+        if (p > 0.7 && !shatterActive) {
+            var ga = (p-0.7)/0.3 * 0.18;
+            var gp = 1 + 0.12*Math.sin(time*3.2);
+            var gr = heartScale*21*gp;
+            var gg = ctx.createRadialGradient(hcx, hcy, heartScale*9, hcx, hcy, gr);
+            gg.addColorStop(0, 'rgba(230,150,180,0)');
+            gg.addColorStop(0.45, 'rgba(230,150,180,'+(ga*0.5)+')');
+            gg.addColorStop(1, 'rgba(230,150,180,0)');
+            ctx.fillStyle = gg;
+            ctx.fillRect(hcx-gr, hcy-gr, gr*2, gr*2);
+        }
+
+        // ── 融化尾迹（底部尖尾滴落流光）──
+        if (p > 0.4) {
+            var meltAlpha = (p-0.4)/0.6;
+            var tipT = Math.PI; // 裂口=视觉最下端
+            var tipX = heartX(tipT)*heartScale*breath;
+            var tipY = heartY(tipT)*heartScale*breath;
+            var trx1 = tipX*cosSA;
+            var trz1 = -tipX*sinSA;
+            var tipSX = hcx + trx1;
+            var tipSY = hcy + tipY*cosTX - trz1*sinTX;
+            var meltCount = Math.floor(meltAlpha * 6);
+            if (Math.random() < meltAlpha*6 - meltCount) meltCount++;
+            for (var mi = 0; mi < meltCount; mi++) {
+                var sp2 = splashPool[splashNext];
+                sp2.alive = true;
+                sp2.x = tipSX + (Math.random()-0.5)*8;
+                sp2.y = tipSY + Math.random()*5;
+                sp2.vx = (Math.random()-0.5)*1.5;
+                sp2.vy = 0.8 + Math.random()*3.5;
+                sp2.life = 0; sp2.maxLife = 0.5+Math.random()*0.8;
+                sp2.r = 0.4+Math.random()*1.6;
+                sp2.cr = 240+Math.random()*15; sp2.cg = 150+Math.random()*60; sp2.cb = 170+Math.random()*50;
+                splashNext = (splashNext+1)%SPLASH_N;
+            }
+        }
+
+        // ── 崩散粒子渲染 ──
+        for (var si2 = 0; si2 < SHATTER_N; si2++) {
+            var sp4 = shatterPool[si2];
+            if (!sp4.alive) continue;
+            sp4.life += 0.016;
+            sp4.vy += 0.10; sp4.x += sp4.vx; sp4.y += sp4.vy;
+            var surfAtX = surfaceY1D(sp4.x, time);
+            var seaMerge = 0;
+            if (sp4.y >= surfAtX - 5) {
+                seaMerge = clamp((sp4.y - surfAtX + 5) / 35, 0, 1);
+                sp4.vy *= 0.85; sp4.vx *= 0.92;
+            }
+            if (sp4.y > H+20 || seaMerge >= 1) { sp4.alive = false; continue; }
+            var sf = clamp(sp4.life*1.0 + seaMerge, 0, 1);
+            var sa = sp4.alpha*(1-sf);
+            var sR = lerp(sp4.cr, 60, seaMerge);
+            var sG = lerp(sp4.cg, 160, seaMerge);
+            var sB = lerp(sp4.cb, 220, seaMerge);
+            var sSz = Math.max(0.3, sp4.r*(1-sf*0.5));
+            ctx.beginPath();
+            ctx.arc(sp4.x, sp4.y, sSz, 0, Math.PI*2);
+            ctx.fillStyle = 'rgba('+(sR|0)+','+(sG|0)+','+(sB|0)+','+sa+')';
+            ctx.fill();
+        }
+
+        // ── 预览小窗 ──────────────────────
+        if (cameraActive) {
+            var pw = 160, ph = 120;
+            previewCtx.clearRect(0,0,pw,ph);
+            if (video.readyState >= 2) {
+                previewCtx.save();
+                previewCtx.scale(-1,1);
+                previewCtx.drawImage(video, -pw,0,pw,ph);
+                previewCtx.restore();
+            }
+            if (lastLandmarks) {
+                var lm = lastLandmarks;
+                function mpx(rawX) { return (1-rawX)*pw; }
+                function mpy(rawY) { return rawY*ph; }
+                // 骨架线颜色随捏合：绿→金
+                var lineR = lerp(0, 255, p), lineG = lerp(255, 180, p), lineB = lerp(200, 50, p);
+                previewCtx.strokeStyle = 'rgba('+(lineR|0)+','+(lineG|0)+','+(lineB|0)+',0.7)';
+                previewCtx.lineWidth = 1;
+                for (var ci=0; ci<HAND_CONNECTIONS.length; ci++) {
+                    var a=lm[HAND_CONNECTIONS[ci][0]], b=lm[HAND_CONNECTIONS[ci][1]];
+                    previewCtx.beginPath();
+                    previewCtx.moveTo(mpx(a.x),mpy(a.y));
+                    previewCtx.lineTo(mpx(b.x),mpy(b.y));
+                    previewCtx.stroke();
+                }
+                for (var li=0; li<21; li++) {
+                    var lx=mpx(lm[li].x), ly=mpy(lm[li].y);
+                    previewCtx.beginPath();
+                    previewCtx.arc(lx,ly,2,0,Math.PI*2);
+                    previewCtx.fillStyle = (li===4||li===8)?'#ff4081':'rgba(0,255,200,0.8)';
+                    previewCtx.fill();
+                    if (li===4||li===8){ previewCtx.arc(lx,ly,4,0,Math.PI*2); previewCtx.fill(); }
+                }
+                var rawP=Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y);
+                var rng=pinchOpenRef-pinchCloseRef;
+                var pinchPct=rng>0.0005?(1-(rawP-pinchCloseRef)/rng)*100:0;
+                pinchPct=Math.max(0,Math.min(100,pinchPct|0));
+                previewCtx.font='10px monospace';previewCtx.fillStyle='#fff';previewCtx.textAlign='center';
+                previewCtx.fillText(pinchPct+'%', mpx((lm[4].x+lm[8].x)/2), mpy((lm[4].y+lm[8].y)/2)-10);
+            } else {
+                previewCtx.font='10px monospace';previewCtx.fillStyle='rgba(255,255,255,0.6)';
+                previewCtx.textAlign='center';
+                previewCtx.fillText(cameraReady?'未检测到手':'模型加载中...', pw/2, ph/2);
+            }
+            // 高捏合时小窗缩小
+            if (p > 0.8) { preview.classList.add('dimmed'); }
+            else { preview.classList.remove('dimmed'); }
+        }
+
+        requestAnimationFrame(draw);
+    }
+    requestAnimationFrame(draw);
+
+    // ═══════════════ 摄像头 + MediaPipe ═════════════
+    var statusEl = document.getElementById('status');
+    function setStatus(msg) { if (statusEl) statusEl.textContent = msg; }
+
+    (async function initCamera() {
+        // ── 摄像头权限 ──
+        setStatus('请求摄像头权限...');
+        try {
+            var stream = await Promise.race([
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480 } }),
+                new Promise(function(_, reject) { setTimeout(function(){ reject(new Error('timeout')); }, 10000); })
+            ]);
+            video.srcObject = stream;
+            await video.play();
+            cameraActive = true;
+        } catch(e) {
+            setStatus(e.message==='timeout' ? '摄像头超时\n纯动画模式运行中' : '摄像头权限未开启\n纯动画模式运行中');
+            if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 3000);
+            return;
+        }
+
+        // ── CDN双源加载 ──
+        setStatus('加载手势模型...');
+        var CDN_LIST = [
+            'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js',
+            'https://unpkg.com/@mediapipe/hands@0.4/hands.js'
+        ];
+        function loadScript(src) {
+            return new Promise(function(resolve, reject) {
+                var s = document.createElement('script');
+                s.src = src;
+                var timer = setTimeout(function(){ s.onerror=null; reject(new Error('timeout: '+src)); }, 10000);
+                s.onload = function(){ clearTimeout(timer); resolve(); };
+                s.onerror = function(){ clearTimeout(timer); reject(new Error('load fail: '+src)); };
+                document.head.appendChild(s);
+            });
+        }
+        var loaded = false;
+        for (var cdi = 0; cdi < CDN_LIST.length; cdi++) {
+            try { await loadScript(CDN_LIST[cdi]); loaded = true; break; }
+            catch(e) { console.log('CDN失败:', CDN_LIST[cdi]); }
+        }
+        if (!loaded || !window.Hands) {
+            setStatus('手势模型加载失败\n纯动画模式运行中');
+            cameraActive = true; cameraReady = true;
+            if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 3000);
+            return;
+        }
+
+        var Hands = window.Hands;
+        var hands = new Hands({
+            locateFile: function(f) {
+                return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/'+f;
+            }
+        });
+        hands.setOptions({
+            maxNumHands: 1, modelComplexity: 1,
+            minDetectionConfidence: 0.5, minTrackingConfidence: 0.3,
+        });
+        hands.onResults(function(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                lastLandmarks = results.multiHandLandmarks[0];
+                var lm = lastLandmarks;
+                lostFrames = 0;
+
+                // ── 指尖距离 + 掌宽 ──
+                var palmW = Math.hypot(lm[0].x-lm[9].x, lm[0].y-lm[9].y);
+                // 加权捏合：指尖主导(70%) + PIP辅助(30%)，捏紧时PIP防抖，松开时指尖主导
+                var dTip = Math.hypot(lm[4].x-lm[8].x, lm[4].y-lm[8].y);
+                var dPIP = Math.hypot(lm[4].x-lm[6].x, lm[4].y-lm[6].y);
+                var rawPinch = dTip * 0.7 + Math.min(dTip, dPIP) * 0.3;
+
+                // ── 三指弯曲（软因子 0~1）──
+                function tipDist(a,b){ return Math.hypot(lm[a].x-lm[b].x, lm[a].y-lm[b].y); }
+                var curl = 0;
+                if (tipDist(12,9)  < palmW*0.55) curl+=0.33;
+                if (tipDist(16,13) < palmW*0.55) curl+=0.33;
+                if (tipDist(20,17) < palmW*0.55) curl+=0.34;
+                var curlBoost = 0.5 + curl * 0.5;  // 软增益：弯两指即可锁
+
+                // ── 平滑原始距离 + 校准 ──
+                if (smoothRaw < 0.001) { smoothRaw = rawPinch; pinchOpenRef = rawPinch; pinchCloseRef = rawPinch*0.35; }
+                smoothRaw += (rawPinch - smoothRaw) * 0.25;
+                // 快速跟踪张开/闭合极值
+                if (smoothRaw > pinchOpenRef)  pinchOpenRef  += (smoothRaw - pinchOpenRef)  * 0.08;
+                else pinchOpenRef += (smoothRaw - pinchOpenRef) * 0.0005;
+                if (smoothRaw < pinchCloseRef) pinchCloseRef += (smoothRaw - pinchCloseRef) * 0.08;
+                else pinchCloseRef += (smoothRaw - pinchCloseRef) * 0.0005;
+                pinchOpenRef  = clamp(pinchOpenRef,  0.03, 0.25);
+                pinchCloseRef = clamp(pinchCloseRef, 0.003, 0.06);
+                var range = pinchOpenRef - pinchCloseRef;
+                if (range < 0.005) range = 0.005;
+
+                // ── 捏合值（0.15起触发，平滑距离+软弯曲因子）──
+                var linear = 1 - (smoothRaw - pinchCloseRef) / range;
+                linear = clamp(linear, 0, 1);
+                var rawP = Math.pow(linear, 1.6) * curlBoost;
+                if (rawP < 0.05) rawP = 0;
+
+                // ── 锁定状态机 ──
+                if (!pinchLocked) {
+                    if (rawP >= 0.78) { lockedFrames++; if (lockedFrames >= 5) { pinchLocked = true; lockedFrames = 0; shatterActive = false; } }
+                    else { lockedFrames = 0; }
+                } else {
+                    if (rawP <= 0.3) { lockedFrames++; if (lockedFrames >= 5) { pinchLocked = false; lockedFrames = 0; } }
+                    else { lockedFrames = 0; }
+                }
+
+                // ── 6帧防抖状态切换 ──
+                var newState = pinchLocked ? 3 : (rawP > 0.15 ? 2 : 1);
+                if (newState !== lastState) { dbFrames++; if (dbFrames >= 6) { lastState = newState; dbFrames = 0; } }
+                else { dbFrames = 0; }
+
+                // ── 输出 pinchProgress ──
+                if (pinchLocked) {
+                    pinchProgress += (1.0 - pinchProgress) * 0.25; // 平滑锁到1.0
+                } else if (lastState >= 2) {
+                    pinchProgress += (rawP - pinchProgress) * 0.3;
+                } else {
+                    pinchProgress *= 0.85;
+                    if (pinchProgress < 0.02) pinchProgress = 0;
+                }
+
+                // ── 掌心坐标（可靠区→全屏 + 速度外推）──
+                var rawHandY = (lm[0].y+lm[9].y)/2;
+                var rawHandX = (lm[0].x+lm[9].x)/2;
+                // 可靠检测区 0.15~0.85 映射到全屏，超出手移到边缘附近
+                var deadZone = 0.12;
+                if (rawHandX < 0.15) rawHandX = 0.15; // 太靠边靠预测拖
+                if (rawHandX > 0.85) rawHandX = 0.85;
+                if (rawHandY < 0.15) rawHandY = 0.15;
+                if (rawHandY > 0.85) rawHandY = 0.85;
+                var rawX = (1 - rawHandX) / 0.7 * W - W * (0.15/0.7);
+                var rawY = (rawHandY - 0.15) / 0.7 * H * 0.85 + H * 0.04;
+                if (smoothHandX===null){ smoothHandX=rawX; smoothHandY=rawY; handVelX=0;handVelY=0; handSpeed=0; }
+                else {
+                    // 实时速度 + 平滑
+                    var instSpeed = Math.hypot(rawX-smoothHandX, rawY-smoothHandY);
+                    handSpeed += (instSpeed - handSpeed)*0.3;
+                    // 速度→平滑参数：快→跟手紧，慢→高稳定
+                    var k = clamp(0.08 + handSpeed*0.008, 0.08, 0.32);
+                    var d = clamp(0.28 - handSpeed*0.006, 0.08, 0.28);
+                    // 锁定状态额外降低平滑40%
+                    if (pinchLocked) { k *= 1.6; d *= 0.55; }
+                    handVelX += (rawX - smoothHandX)*k - handVelX*d;
+                    handVelY += (rawY - smoothHandY)*k - handVelY*d;
+                    smoothHandX += handVelX;
+                    smoothHandY += handVelY;
+                }
+                predFrames = 0;
+                handDetected = true;
+            } else {
+                lastLandmarks = null;
+                lostFrames++;
+                // 1~2帧：速度预测补位
+                if (lostFrames <= 2 && smoothHandX !== null) {
+                    smoothHandX += handVelX; smoothHandY += handVelY;
+                    handVelX *= 0.88; handVelY *= 0.88;
+                    handDetected = true; return;
+                }
+                // 3帧内容错：保留位置
+                if (lostFrames <= 3) return;
+                // 超3帧：缓慢衰减
+                handDetected = false;
+                pinchLocked = false; lockedFrames = 0;
+                pinchProgress -= 0.03;
+                if (pinchProgress < 0) pinchProgress = 0;
+                dbFrames = 0; lastState = 0;
+            }
+        });
+
+        await hands.send({image: video});
+        cameraReady = true;
+        setStatus('就绪');
+        if (statusEl) setTimeout(function(){ statusEl.classList.add('done'); }, 800);
+        (function feedFrame() {
+            if (cameraReady) hands.send({image: video}).catch(function(){});
+            requestAnimationFrame(feedFrame);
+        })();
+    })();
+
+})();
+</script>
+</body>
+</html>
